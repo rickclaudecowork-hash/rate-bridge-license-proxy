@@ -14,6 +14,11 @@
 // to send the result directly back into the artifact's own iframe — the
 // exact JS context that called window.open() — and closes itself. postMessage
 // isn't restricted by the sandbox's fetch/XHR block, so this works.
+//
+// NOTE: Gumroad requires product_id (not product_permalink) for this
+// product — confirmed via a debug call that returned Gumroad's own error
+// naming the required product_id. This is the product's permanent id and
+// won't change even if the Gumroad listing's URL slug does.
 export default async function handler(req, res) {
   const key = typeof req.query.key === 'string' ? req.query.key.trim() : '';
   let ok = false;
@@ -21,7 +26,7 @@ export default async function handler(req, res) {
 if (key) {
   try {
     const params = new URLSearchParams({
-      product_permalink: 'rate-bridge',
+      product_id: '3CRNt-QgdIQcS4ywOsVIFg==',
       license_key: key,
       increment_uses_count: 'false'
     });
