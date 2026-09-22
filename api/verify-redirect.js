@@ -3,71 +3,51 @@
 //
 // Claude artifacts cannot make outbound fetch()/XHR calls to any external
 // server (confirmed by direct testing — this is a platform sandbox
-// restriction, not a CORS issue). So instead of the artifact calling an API
-// and reading a JSON response, the "Unlock" button opens THIS endpoint as a
-// normal page navigation (which the sandbox does allow). This endpoint:
-//   1. Verifies the license key against Gumroad server-to-server.
-//   2. On success, redirects back to the artifact with a signed token in the
-//      URL fragment (#unlock=<key>&token=<hmac>).
-//   3. The artifact's own JS reads that fragment on load, recomputes the
-//      same HMAC client-side (Web Crypto, no network call needed) and
-//      unlocks if it matches.
+// restriction, not a CORS issue). A redirect back to the artifact URL with
+// data in the URL hash/query doesn't work either — the artifact renders
+// inside a sandboxed cross-origin iframe, which does NOT see the parent
+// tab's address-bar hash or query string (confirmed by direct testing too).
 //
-// SHARED_SECRET has to be embedded in the artifact's own client-side JS too,
-// since that JS is what verifies the token — so this is an integrity check,
-// not a confidentiality one. Anyone who reads the artifact's source could in
-// principle mint their own token without paying. That's an inherent limit of
-// doing verification in a purely static, sandboxed artifact with no server
-// component on the artifact's own side; flagged and accepted as a reasonable
-// trade-off for a low-volume, low-price internal tool.
-import crypto from 'crypto';
+// So instead: "Unlock" opens this endpoint in a NEW TAB via window.open()
+// (popups are allowed out of the sandbox). This page checks the license key
+// against Gumroad server-to-server, then uses window.opener.postMessage()
+// to send the result directly back into the artifact's own iframe — the
+// exact JS context that called window.open() — and closes itself. postMessage
+// isn't restricted by the sandbox's fetch/XHR block, so this works.
+export default async function handler(req, res) {
+  const key = typeof req.query.key === 'string' ? req.query.key.trim() : '';
+  let ok = false;
 
-const SHARED_SECRET = 'rb-9f3a1c7e-8b2d-4e5f-a016-verify-v1';
-
-function sign(key) {
-  return crypto.createHmac('sha256', SHARED_SECRET).update(key).digest('hex');
+if (key) {
+  try {
+    const params = new URLSearchParams({
+      product_permalink: 'rate-bridge',
+      license_key: key,
+      increment_uses_count: 'false'
+    });
+    const gumroadRes = await fetch('https://api.gumroad.com/v2/licenses/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    });
+    const data = await gumroadRes.json();
+    ok = !!(data && data.success);
+  } catch (e) {
+    ok = false;
+  }
 }
 
-  export default async function handler(req, res) {
-    const key = typeof req.query.key === 'string' ? req.query.key.trim() : '';
-      const artifact = typeof req.query.artifact === 'string' ? req.query.artifact : '';
-    const artifactUrl = artifact.startsWith('https://claude.ai/artifact/') ? artifact : null;
+const html = '<!doctype html><html><head><meta charset="utf8"></head>' +
+  '<body style="font-family:-apple-system,system-ui,sans-serif;padding:32px;max-width:480px;margin:0 auto;text-align:center;color:#12181D">' +
+  '<p id="msg" style="font-size:15px;line-height:1.5">' +
+  (ok ? 'Verified! Sending you back to Rate Bridge&hellip;' : 'That license key did not verify. Check it against your purchase email, then close this tab and try again.') +
+  '</p>' +
+  '<script>' +
+  'try{ if (window.opener) { window.opener.postMessage({ source: "rate-bridge-verify", ok: ' + (ok ? 'true' : 'false') + ' }, "*"); } }catch(e){}' +
+  (ok ? 'setTimeout(function(){ try{ window.close(); }catch(e){} }, 1000);' : '') +
+  '</script>' +
+  '</body></html>';
 
-                                            if (!artifactUrl) {
-                                              res.status(400).send('Missing or invalid "artifact" parameter.');
-                                                  return;
-                                            }
-                                              if (!key) {
-                                                res.writeHead(302, { Location: artifactUrl + '#unlock_failed=1' });
-                                                res.end();
-                                                    return;
-                                              }
-
-                                                try {
-                                                  const params = new URLSearchParams({
-                                                          product_permalink: 'rate-bridge',
-                                                          license_key: key,
-                                                          increment_uses_count: 'false'
-                                                  });
-                                                  const gumroadRes = await fetch('https://api.gumroad.com/v2/licenses/verify', {
-                                                                                       method: 'POST',
-                                                                                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                                                                                 body: params.toString()
-                                                                                 });
-                                                                                 const data = await gumroadRes.json();
-
-                                                                                 if (data && data.success) {
-                                                                                   const token = sign(key);
-                                                                                   const hash = '#unlock=' + encodeURIComponent(key) + '&token=' + token;
-                                                                                   res.writeHead(302, { Location: artifactUrl + hash });
-                                                                                   res.end();
-                                                                                 } else {
-                                                                                   res.writeHead(302, { Location: artifactUrl + '#unlock_failed=1' });
-                                                                                   res.end();
-                                                                                 }
-                                                                                   } catch (e) {
-                                                                                     res.writeHead(302, { Location: artifactUrl + '#unlock_failed=1' });
-                                                                                     res.end();
-                                                                                   }
-                                                                                   }
-                                                                                   
+res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.status(200).send(html);
+}
